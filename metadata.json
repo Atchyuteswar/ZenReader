@@ -1,0 +1,5 @@
+{
+  "name": "ZenReader",
+  "description": "A minimalist, tablet-optimized EPUB reader with local library storage.",
+  "requestFramePermissions": []
+}

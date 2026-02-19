@@ -1,0 +1,13 @@
+@import "tailwindcss";
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+  touch-action: manipulation; /* Improve touch response */
+}
+
+/* Highlight Colors */
+.hl-yellow { fill: #ffeb3b; fill-opacity: 0.3; mix-blend-mode: multiply; }
+.hl-green { fill: #a5d6a7; fill-opacity: 0.3; mix-blend-mode: multiply; }
+.hl-blue { fill: #90caf9; fill-opacity: 0.3; mix-blend-mode: multiply; }
+.hl-red { fill: #ef9a9a; fill-opacity: 0.3; mix-blend-mode: multiply; }
