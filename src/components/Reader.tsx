@@ -1,8 +1,8 @@
-import { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import ePub, { Book as EpubBook, Rendition } from 'epubjs';
 import { Book, Highlight, Bookmark } from '../types';
 import { storage } from '../lib/storage';
-import { ArrowLeft, ChevronLeft, ChevronRight, Settings, Type, Moon, Sun, Bookmark as BookmarkIcon, List, X, Trash2 } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight, Settings, Type, Moon, Sun, Bookmark as BookmarkIcon, List, X, Trash2, Search as SearchIcon } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 
 interface ReaderProps {
@@ -11,6 +11,47 @@ interface ReaderProps {
 }
 
 type Theme = 'light' | 'dark' | 'sepia';
+
+// Recursive TOC Item Component
+interface TOCItemProps {
+  item: any;
+  level?: number;
+  onNavigate: (href: string) => void;
+}
+
+const TOCItem: React.FC<TOCItemProps> = ({ item, level = 0, onNavigate }) => {
+  const [expanded, setExpanded] = useState(false);
+  const hasChildren = item.subitems && item.subitems.length > 0;
+
+  return (
+    <li>
+      <div className="flex items-center group">
+        <button 
+          onClick={() => onNavigate(item.href)}
+          className="flex-1 text-left py-2 px-3 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 truncate text-sm"
+          style={{ paddingLeft: `${level * 12 + 12}px` }}
+        >
+          {item.label}
+        </button>
+        {hasChildren && (
+          <button 
+            onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
+            className="p-2 opacity-50 hover:opacity-100"
+          >
+            <ChevronRight className={`w-4 h-4 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+          </button>
+        )}
+      </div>
+      {hasChildren && expanded && (
+        <ul className="space-y-1 mt-1">
+          {item.subitems.map((subitem: any, i: number) => (
+            <TOCItem key={i} item={subitem} level={level + 1} onNavigate={onNavigate} />
+          ))}
+        </ul>
+      )}
+    </li>
+  );
+};
 
 export function Reader({ book, onBack }: ReaderProps) {
   const viewerRef = useRef<HTMLDivElement>(null);
@@ -25,10 +66,18 @@ export function Reader({ book, onBack }: ReaderProps) {
   const [toc, setToc] = useState<any[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
+  const [menuTab, setMenuTab] = useState<'chapters' | 'bookmarks' | 'search'>('chapters');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState<any[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [confirmDeleteHighlight, setConfirmDeleteHighlight] = useState<string | null>(null);
   
   const [highlights, setHighlights] = useState<Highlight[]>(book.highlights || []);
   const [bookmarks, setBookmarks] = useState<Bookmark[]>(book.bookmarks || []);
   const [selection, setSelection] = useState<{ cfiRange: string; x: number; y: number } | null>(null);
+  const [activeFootnote, setActiveFootnote] = useState<string | null>(null);
+
+  const [furthestCfi, setFurthestCfi] = useState<string>('');
 
   // Initialize EPUB
   useEffect(() => {
@@ -59,12 +108,13 @@ export function Reader({ book, onBack }: ReaderProps) {
         '.hl-blue': { 'fill': '#90caf9', 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply' },
         '.hl-red': { 'fill': '#ef9a9a', 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply' },
       });
-      rendition.themes.select('highlights'); // This might override other themes if not careful. 
-      // Actually, better to just inject the CSS rules directly or register them as part of the theme.
-      // Let's manually inject a stylesheet.
+      rendition.themes.select('highlights'); 
       
       // Load saved progress or start from beginning
       await rendition.display(book.progress || undefined);
+      if (book.progress) {
+          setFurthestCfi(book.progress);
+      }
       
       // Load TOC
       const navigation = await epub.loaded.navigation;
@@ -80,7 +130,13 @@ export function Reader({ book, onBack }: ReaderProps) {
             '#ef9a9a': 'hl-red'
           };
           const className = colorMap[h.color] || 'hl-yellow';
-          rendition.annotations.add('highlight', h.cfiRange, {}, undefined, className);
+          rendition.annotations.add(
+              'highlight', 
+              h.cfiRange, 
+              {}, 
+              (e: any) => onHighlightClick(h.cfiRange), 
+              className
+          );
         });
       }
 
@@ -95,32 +151,46 @@ export function Reader({ book, onBack }: ReaderProps) {
     rendition.on('relocated', (location: any) => {
       setCurrentCfi(location.start.cfi);
       storage.updateProgress(book.id, location.start.cfi);
-      setSelection(null); // Clear selection on page turn
+      setSelection(null);
+      
+      setFurthestCfi(location.start.cfi);
     });
 
     rendition.on('selected', (cfiRange: string, contents: any) => {
       const range = rendition.getRange(cfiRange);
       const rect = range.getBoundingClientRect();
       
-      // Adjust coordinates to be relative to the viewer container
-      // Note: rect is relative to the iframe viewport. We need to account for iframe position if needed,
-      // but usually the iframe fills the viewer.
-      // However, the event might be coming from inside the iframe.
-      
-      // Simple positioning: center of the selection
       setSelection({
         cfiRange,
         x: rect.left + rect.width / 2,
         y: rect.top - 10 // Position above
       });
-      
-      // Keep the selection visible
-      // contents.window.getSelection().removeAllRanges(); // Don't remove yet, let user see what they selected
     });
     
-    // Clear selection when clicking elsewhere
-    rendition.on('click', () => {
+    // Handle clicks (selection clear & footnotes)
+    rendition.on('click', (e: any) => {
       setSelection(null);
+
+      const link = e.target.closest('a');
+      if (link) {
+        const href = link.getAttribute('href');
+        const epubType = link.getAttribute('epub:type');
+        const role = link.getAttribute('role');
+        const classList = link.classList;
+        
+        // Heuristic for footnotes
+        const isFootnote = 
+          epubType === 'noteref' || 
+          role === 'doc-noteref' || 
+          classList.contains('footnote') || 
+          classList.contains('note') ||
+          (href && (href.includes('fn') || href.includes('note')));
+
+        if (isFootnote && href) {
+          e.preventDefault();
+          handleFootnote(href);
+        }
+      }
     });
 
     // Handle resize
@@ -147,6 +217,77 @@ export function Reader({ book, onBack }: ReaderProps) {
     };
   }, [book.id]);
 
+  const handleFootnote = async (href: string) => {
+    if (!bookRef.current) return;
+
+    try {
+      // 1. Resolve the href to find the target item
+      // Note: href might be relative. 
+      // We can try to find the item in the spine.
+      let targetId = '';
+      let targetItem = null;
+
+      if (href.includes('#')) {
+        const parts = href.split('#');
+        targetId = parts[1];
+        // If there is a path part, use it to find the item. 
+        // If not (just #id), it's in the current chapter (or we assume so).
+        if (parts[0]) {
+           targetItem = bookRef.current.spine.get(parts[0]);
+        }
+      } else {
+        // Just a link to a file? Unlikely for a footnote, but possible.
+        targetItem = bookRef.current.spine.get(href);
+      }
+
+      // If we didn't find a target item from the href path, assume current chapter
+      if (!targetItem) {
+        // We can try to find the element in the current view
+        const currentView = renditionRef.current?.getContents()[0];
+        if (currentView && targetId) {
+          const el = currentView.document.getElementById(targetId);
+          if (el) {
+            setActiveFootnote(el.innerHTML);
+            return;
+          }
+        }
+        // If not found in current view, it might be in the same spine item but not rendered? 
+        // (Unlikely if flow is paginated and it's one file, but possible if split)
+        // Let's fallback to loading the current spine item text if we can identify it.
+        // For now, if we can't find it, we might fail or try to load the href as is.
+      }
+
+      // If we have a target item (external file or resolved path), load it
+      if (targetItem) {
+        // We need to load the document. 
+        // book.load(url) loads the document.
+        // targetItem.href gives the path.
+        // However, we need to load it without displaying it.
+        // We can use the internal `load` method or fetch it.
+        // epub.js `load` might be bound to the book.
+        
+        // A safer way in epub.js v0.3:
+        // item.load(book.load.bind(book)) -> returns document
+        const doc = await targetItem.load(bookRef.current.load.bind(bookRef.current));
+        
+        if (targetId) {
+          const el = doc.getElementById(targetId);
+          if (el) {
+            setActiveFootnote(el.innerHTML);
+          } else {
+            console.warn('Footnote element not found in target document', targetId);
+          }
+        } else {
+          // No ID, maybe just show the whole body? Or first paragraph?
+          setActiveFootnote(doc.body.innerHTML);
+        }
+      }
+
+    } catch (err) {
+      console.error('Failed to load footnote', err);
+    }
+  };
+
   // Theme & Font Handling
   const applyTheme = (newTheme: Theme) => {
     if (!renditionRef.current) return;
@@ -171,7 +312,83 @@ export function Reader({ book, onBack }: ReaderProps) {
   const next = () => renditionRef.current?.next();
   const prev = () => renditionRef.current?.prev();
 
+  // Search Logic
+  const handleSearch = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!searchQuery.trim() || !bookRef.current) return;
+    
+    setIsSearching(true);
+    setSearchResults([]);
+    
+    try {
+      // Iterate through spine items to search
+      // Note: This can be slow for large books. In a real app, we'd index this or use a worker.
+      const results: any[] = [];
+      
+      // We limit to first 10 chapters for demo performance if needed, or just try all.
+      // Let's try to search concurrently but limit concurrency? 
+      // For now, simple sequential or Promise.all
+      
+      const spineItems = bookRef.current.spine.spineItems;
+      
+      for (const item of spineItems) {
+        // Load the document text
+        // We use a lightweight load if possible, but epubjs load returns the doc.
+        // We need to be careful not to render it.
+        try {
+            // Accessing the raw text might be better if available, but usually we need to load the HTML.
+            // item.load() loads the resource.
+            const doc = await item.load(bookRef.current.load.bind(bookRef.current));
+            const text = doc.body.textContent || '';
+            const lowerText = text.toLowerCase();
+            const lowerQuery = searchQuery.toLowerCase();
+            
+            let index = lowerText.indexOf(lowerQuery);
+            while (index !== -1) {
+                // Create a rough excerpt
+                const start = Math.max(0, index - 30);
+                const end = Math.min(text.length, index + lowerQuery.length + 30);
+                const excerpt = text.substring(start, end).replace(/\s+/g, ' ');
+                
+                // We need a CFI for this result. 
+                // Generating CFI from text index is hard without the renderer.
+                // However, epub.js has a `find` method on the rendition? No.
+                // But `section.find(query)` exists?
+                // Actually, let's use the built-in find if we can rely on it, but it's often missing or broken in v0.3.
+                // Let's try to use the `cfiFromElement` if we can find the element.
+                
+                // Alternative: Use `item.find(query)` if it exists.
+                // Checking epub.js source/docs... `Section` has `find`.
+                
+                results.push({
+                    cfi: item.href, // This is just the chapter link, not specific CFI. Better than nothing.
+                    label: `...${excerpt}...`,
+                    href: item.href
+                });
+                
+                // Limit results per chapter
+                if (results.length > 50) break; 
+                
+                index = lowerText.indexOf(lowerQuery, index + 1);
+            }
+        } catch (err) {
+            console.warn('Error searching chapter', err);
+        }
+      }
+      
+      setSearchResults(results);
+    } catch (error) {
+      console.error('Search failed', error);
+    } finally {
+      setIsSearching(false);
+    }
+  };
+
   // Highlight Logic
+  const onHighlightClick = (cfiRange: string) => {
+    setConfirmDeleteHighlight(cfiRange);
+  };
+
   const addHighlight = async (color: string) => {
     if (!selection || !renditionRef.current) return;
     
@@ -187,10 +404,21 @@ export function Reader({ book, onBack }: ReaderProps) {
       '#90caf9': 'hl-blue',
       '#ef9a9a': 'hl-red'
     };
-    const className = colorMap[color] || 'hl-yellow';
-
-    // Add visual annotation
-    renditionRef.current.annotations.add('highlight', selection.cfiRange, {}, undefined, className);
+    // If custom color, we might need dynamic style injection or just use closest class.
+    // For now, let's just use the style attribute if possible? 
+    // Epubjs annotations allow styles object.
+    
+    // We will use the callback to handle clicks
+    renditionRef.current.annotations.add(
+        'highlight', 
+        selection.cfiRange, 
+        {}, 
+        (e: any) => onHighlightClick(selection.cfiRange), 
+        colorMap[color] || 'hl-yellow'
+    );
+    
+    // If it's a custom color not in map, we might want to inject a style.
+    // But for now we stick to the map or default.
 
     // Save
     await storage.addHighlight(book.id, highlight);
@@ -356,41 +584,72 @@ export function Reader({ book, onBack }: ReaderProps) {
                 theme === 'dark' ? 'bg-[#1a1a1a] text-stone-200' : 'bg-white text-stone-800'
               }`}
             >
-              <div className="p-4 border-b border-stone-200 dark:border-neutral-800 flex justify-between items-center">
-                <h2 className="font-serif font-bold text-xl">Contents</h2>
-                <button onClick={() => setShowMenu(false)} className="p-2 hover:bg-black/5 dark:hover:bg-white/10 rounded-full">
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-              
-              <div className="flex-1 overflow-y-auto">
-                <div className="p-4">
-                  <h3 className="text-xs font-bold opacity-50 uppercase tracking-wider mb-3">Chapters</h3>
-                  <ul className="space-y-1">
-                    {toc.map((item, i) => (
-                      <li key={i}>
-                        <button 
-                          onClick={() => goToLocation(item.href)}
-                          className="w-full text-left py-2 px-3 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 truncate text-sm"
-                        >
-                          {item.label}
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
+              <div className="flex flex-col h-full">
+                <div className="p-4 border-b border-stone-200 dark:border-neutral-800 flex justify-between items-center">
+                  <h2 className="font-serif font-bold text-xl">Menu</h2>
+                  <button onClick={() => setShowMenu(false)} className="p-2 hover:bg-black/5 dark:hover:bg-white/10 rounded-full">
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
 
-                  {bookmarks.length > 0 && (
-                    <>
-                      <h3 className="text-xs font-bold opacity-50 uppercase tracking-wider mt-6 mb-3">Bookmarks</h3>
-                      <ul className="space-y-1">
-                        {bookmarks.map((bookmark, i) => (
+                <div className="flex border-b border-stone-200 dark:border-neutral-800">
+                  <button 
+                    onClick={() => setMenuTab('chapters')}
+                    className={`flex-1 py-3 text-sm font-medium transition-colors ${
+                      menuTab === 'chapters' 
+                        ? 'text-indigo-600 border-b-2 border-indigo-600' 
+                        : 'text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-200'
+                    }`}
+                  >
+                    Chapters
+                  </button>
+                  <button 
+                    onClick={() => setMenuTab('bookmarks')}
+                    className={`flex-1 py-3 text-sm font-medium transition-colors ${
+                      menuTab === 'bookmarks' 
+                        ? 'text-indigo-600 border-b-2 border-indigo-600' 
+                        : 'text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-200'
+                    }`}
+                  >
+                    Bookmarks
+                  </button>
+                  <button 
+                    onClick={() => setMenuTab('search')}
+                    className={`flex-1 py-3 text-sm font-medium transition-colors ${
+                      menuTab === 'search' 
+                        ? 'text-indigo-600 border-b-2 border-indigo-600' 
+                        : 'text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-200'
+                    }`}
+                  >
+                    Search
+                  </button>
+                </div>
+                
+                <div className="flex-1 overflow-y-auto p-4">
+                  {menuTab === 'chapters' ? (
+                    <ul className="space-y-1">
+                      {toc.length > 0 ? (
+                        toc.map((item, i) => (
+                          <TOCItem key={i} item={item} onNavigate={goToLocation} />
+                        ))
+                      ) : (
+                        <li className="text-stone-500 text-sm italic p-2">No table of contents found.</li>
+                      )}
+                    </ul>
+                  ) : menuTab === 'bookmarks' ? (
+                    <ul className="space-y-1">
+                      {bookmarks.length > 0 ? (
+                        bookmarks.map((bookmark, i) => (
                           <li key={i} className="flex items-center group">
                             <button 
                               onClick={() => goToLocation(bookmark.cfi)}
                               className="flex-1 text-left py-2 px-3 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 truncate text-sm flex items-center gap-2"
                             >
                               <BookmarkIcon className="w-3 h-3 fill-current opacity-50" />
-                              {bookmark.label}
+                              <div className="flex flex-col truncate">
+                                <span className="truncate">{bookmark.label}</span>
+                                <span className="text-[10px] opacity-50 font-mono">{new Date(bookmark.created).toLocaleDateString()}</span>
+                              </div>
                             </button>
                             <button 
                               onClick={(e) => { e.stopPropagation(); deleteBookmark(bookmark.cfi); }}
@@ -399,12 +658,103 @@ export function Reader({ book, onBack }: ReaderProps) {
                               <Trash2 className="w-4 h-4" />
                             </button>
                           </li>
-                        ))}
-                      </ul>
-                    </>
+                        ))
+                      ) : (
+                        <li className="text-stone-500 text-sm italic p-2 text-center mt-10">
+                          <BookmarkIcon className="w-8 h-8 mx-auto mb-2 opacity-20" />
+                          No bookmarks yet.
+                        </li>
+                      )}
+                    </ul>
+                  ) : (
+                    <div className="flex flex-col h-full">
+                        <form onSubmit={handleSearch} className="mb-4">
+                            <div className="relative">
+                                <input 
+                                    type="text" 
+                                    value={searchQuery}
+                                    onChange={(e) => setSearchQuery(e.target.value)}
+                                    placeholder="Search..."
+                                    className="w-full pl-9 pr-4 py-2 bg-stone-100 dark:bg-neutral-800 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                />
+                                <SearchIcon className="absolute left-3 top-2.5 w-4 h-4 text-stone-400" />
+                            </div>
+                        </form>
+                        
+                        {isSearching ? (
+                            <div className="flex justify-center py-8">
+                                <div className="w-6 h-6 border-2 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
+                            </div>
+                        ) : (
+                            <ul className="space-y-2">
+                                {searchResults.length > 0 ? (
+                                    searchResults.map((result, i) => (
+                                        <li key={i}>
+                                            <button 
+                                                onClick={() => goToLocation(result.href)}
+                                                className="w-full text-left py-2 px-3 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 text-sm"
+                                            >
+                                                <div className="font-serif text-xs opacity-70 mb-1 line-clamp-2" dangerouslySetInnerHTML={{ __html: result.label }} />
+                                                <div className="text-[10px] opacity-40 font-mono truncate">{result.href}</div>
+                                            </button>
+                                        </li>
+                                    ))
+                                ) : searchQuery && (
+                                    <li className="text-stone-500 text-sm italic p-2 text-center">No results found.</li>
+                                )}
+                            </ul>
+                        )}
+                    </div>
                   )}
                 </div>
               </div>
+            </motion.div>
+          </>
+        )}
+      </AnimatePresence>
+
+      {/* Highlight Removal Confirmation */}
+      <AnimatePresence>
+        {confirmDeleteHighlight && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setConfirmDeleteHighlight(null)}
+              className="absolute inset-0 bg-black/20 z-50 backdrop-blur-[1px] flex items-center justify-center"
+            >
+                <motion.div 
+                    initial={{ scale: 0.9, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0.9, opacity: 0 }}
+                    className={`p-6 rounded-xl shadow-xl max-w-xs w-full ${
+                        theme === 'dark' ? 'bg-[#2a2a2a] text-stone-200' : 'bg-white text-stone-800'
+                    }`}
+                    onClick={(e) => e.stopPropagation()}
+                >
+                    <h3 className="font-bold mb-2">Remove Highlight?</h3>
+                    <p className="text-sm opacity-70 mb-4">This will permanently remove the highlight.</p>
+                    <div className="flex gap-2">
+                        <button 
+                            onClick={() => setConfirmDeleteHighlight(null)}
+                            className="flex-1 py-2 rounded-lg hover:bg-black/5 dark:hover:bg-white/10 text-sm font-medium"
+                        >
+                            Cancel
+                        </button>
+                        <button 
+                            onClick={() => {
+                                if (confirmDeleteHighlight) {
+                                    removeHighlight(confirmDeleteHighlight);
+                                    setConfirmDeleteHighlight(null);
+                                }
+                            }}
+                            className="flex-1 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white text-sm font-medium"
+                        >
+                            Remove
+                        </button>
+                    </div>
+                </motion.div>
             </motion.div>
           </>
         )}
@@ -417,7 +767,7 @@ export function Reader({ book, onBack }: ReaderProps) {
             initial={{ opacity: 0, scale: 0.9, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.9, y: 10 }}
-            className="absolute z-50 bg-white dark:bg-neutral-800 rounded-full shadow-lg border border-stone-200 dark:border-neutral-700 p-2 flex gap-2"
+            className="absolute z-50 bg-white dark:bg-neutral-800 rounded-full shadow-lg border border-stone-200 dark:border-neutral-700 p-2 flex gap-2 items-center"
             style={{ 
               top: Math.min(selection.y - 60, window.innerHeight - 80), // Keep on screen
               left: Math.max(10, Math.min(selection.x - 100, window.innerWidth - 210)) // Keep on screen
@@ -431,6 +781,16 @@ export function Reader({ book, onBack }: ReaderProps) {
                 style={{ backgroundColor: color }}
               />
             ))}
+            
+            {/* Custom Color Picker */}
+            <div className="relative w-8 h-8 rounded-full overflow-hidden border border-black/10 hover:scale-110 transition-transform bg-gradient-to-br from-red-500 via-green-500 to-blue-500">
+                <input 
+                    type="color" 
+                    className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                    onChange={(e) => addHighlight(e.target.value)}
+                />
+            </div>
+
             <div className="w-px h-8 bg-stone-200 dark:bg-neutral-700 mx-1" />
             <button 
               onClick={() => setSelection(null)}
@@ -439,6 +799,50 @@ export function Reader({ book, onBack }: ReaderProps) {
               <X className="w-5 h-5" />
             </button>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Footnote Popup */}
+      <AnimatePresence>
+        {activeFootnote && (
+          <>
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setActiveFootnote(null)}
+              className="absolute inset-0 bg-black/20 z-50 backdrop-blur-[1px]"
+            />
+            <motion.div
+              initial={{ y: '100%' }}
+              animate={{ y: 0 }}
+              exit={{ y: '100%' }}
+              transition={{ type: 'spring', damping: 25, stiffness: 200 }}
+              className={`absolute bottom-0 left-0 right-0 p-6 rounded-t-2xl shadow-2xl z-50 max-h-[50vh] overflow-y-auto ${
+                theme === 'dark' ? 'bg-[#2a2a2a] text-stone-200' : 'bg-white text-stone-800'
+              }`}
+            >
+              <div className="flex justify-between items-start mb-4">
+                <h3 className="text-sm font-bold opacity-50 uppercase tracking-wider">Footnote</h3>
+                <button 
+                  onClick={() => setActiveFootnote(null)}
+                  className="p-1 hover:bg-black/5 dark:hover:bg-white/10 rounded-full"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div 
+                className="prose dark:prose-invert prose-sm max-w-none mb-6"
+                dangerouslySetInnerHTML={{ __html: activeFootnote }}
+              />
+              <button 
+                onClick={() => setActiveFootnote(null)}
+                className="w-full py-3 rounded-xl bg-stone-100 dark:bg-neutral-700 hover:bg-stone-200 dark:hover:bg-neutral-600 font-medium text-sm transition-colors"
+              >
+                Back to text
+              </button>
+            </motion.div>
+          </>
         )}
       </AnimatePresence>
 
@@ -472,9 +876,22 @@ export function Reader({ book, onBack }: ReaderProps) {
           <ChevronLeft className="w-8 h-8" />
         </button>
         
-        <div className="text-xs opacity-50 font-mono">
-          {/* Progress bar or page number could go here if we calculated locations */}
-          Reading
+        <div className="text-xs opacity-50 font-mono flex items-center gap-2">
+          {/* Auto-bookmark indicator */}
+          {furthestCfi && currentCfi !== furthestCfi ? (
+             <button 
+                onClick={() => goToLocation(furthestCfi)}
+                className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-indigo-500 hover:text-indigo-600 font-bold animate-pulse"
+             >
+                <BookmarkIcon className="w-3 h-3 fill-current" />
+                <span>Return to Latest</span>
+             </button>
+          ) : (
+             <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider">
+                <BookmarkIcon className="w-3 h-3 fill-current" />
+                <span>Saved</span>
+             </div>
+          )}
         </div>
 
         <button onClick={next} className="p-3 hover:bg-black/5 dark:hover:bg-white/10 rounded-full transition-colors">
