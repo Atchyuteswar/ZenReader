@@ -2,8 +2,9 @@ import React, { useEffect, useState } from 'react';
 import { Book } from '../types';
 import { storage } from '../lib/storage';
 import { ImportButton } from './ImportButton';
-import { BookOpen, Trash2 } from 'lucide-react';
-import { motion } from 'motion/react';
+import { BookOpen, Trash2, Upload } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
+import { importEpub } from '../services/importService';
 
 interface LibraryProps {
   onSelectBook: (book: Book) => void;
@@ -12,6 +13,8 @@ interface LibraryProps {
 export function Library({ onSelectBook }: LibraryProps) {
   const [books, setBooks] = useState<Book[]>([]);
   const [loading, setLoading] = useState(true);
+
+  const [isDragging, setIsDragging] = useState(false);
 
   const loadBooks = async () => {
     setLoading(true);
@@ -29,6 +32,34 @@ export function Library({ onSelectBook }: LibraryProps) {
     loadBooks();
   }, []);
 
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    setIsDragging(false);
+    
+    const file = e.dataTransfer.files[0];
+    if (file && file.name.endsWith('.epub')) {
+      setLoading(true);
+      try {
+        await importEpub(file);
+        loadBooks();
+      } catch (err) {
+        console.error(err);
+        alert('Failed to import EPUB');
+      } finally {
+        setLoading(false);
+      }
+    }
+  };
+
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (confirm('Are you sure you want to delete this book?')) {
@@ -38,7 +69,28 @@ export function Library({ onSelectBook }: LibraryProps) {
   };
 
   return (
-    <div className="min-h-screen bg-stone-50 p-6 md:p-10">
+    <div 
+      className={`min-h-screen bg-stone-50 p-6 md:p-10 transition-colors ${isDragging ? 'bg-indigo-50/50' : ''}`}
+      onDragOver={handleDragOver}
+      onDragLeave={handleDragLeave}
+      onDrop={handleDrop}
+    >
+      <AnimatePresence>
+        {isDragging && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-indigo-600/10 backdrop-blur-[2px] pointer-events-none"
+          >
+            <div className="bg-white p-10 rounded-3xl shadow-2xl border-2 border-dashed border-indigo-400 flex flex-col items-center gap-4">
+              <Upload className="w-16 h-16 text-indigo-500 animate-bounce" />
+              <p className="text-xl font-medium text-indigo-900 font-serif">Drop to import EPUB</p>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       <header className="flex justify-between items-center mb-10 max-w-7xl mx-auto">
         <div>
           <h1 className="text-3xl font-serif font-bold text-stone-900 tracking-tight">Library</h1>
@@ -72,7 +124,7 @@ export function Library({ onSelectBook }: LibraryProps) {
               className="group relative flex flex-col cursor-pointer"
               onClick={() => onSelectBook(book)}
             >
-              <div className="aspect-[2/3] bg-stone-200 rounded-lg shadow-md overflow-hidden relative mb-3 transition-transform group-hover:-translate-y-1 group-hover:shadow-xl">
+              <div className="aspect-[2/3] bg-stone-200 rounded-lg shadow-md overflow-hidden relative mb-3 transition-transform group-hover:-translate-y-1 group-hover:shadow-xl border border-stone-200 dark:border-stone-800">
                 {book.cover ? (
                   <img src={book.cover} alt={book.title} className="w-full h-full object-cover" />
                 ) : (
@@ -81,19 +133,36 @@ export function Library({ onSelectBook }: LibraryProps) {
                   </div>
                 )}
                 
+                {/* Progress Overlay */}
+                {book.progressPercentage !== undefined && (
+                  <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/20">
+                    <div 
+                      className="h-full bg-indigo-500" 
+                      style={{ width: `${book.progressPercentage}%` }} 
+                    />
+                  </div>
+                )}
+
                 <button
                   onClick={(e) => handleDelete(e, book.id)}
-                  className="absolute top-2 right-2 p-2 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600"
+                  className="absolute top-2 right-2 p-2 bg-black/50 text-white rounded-full opacity-0 group-hover:opacity-100 transition-opacity hover:bg-red-600 backdrop-blur-sm"
                   title="Delete book"
                 >
                   <Trash2 className="w-4 h-4" />
                 </button>
               </div>
               
-              <h3 className="font-medium text-stone-900 text-sm line-clamp-2 leading-tight mb-1">
+              <h3 className="font-medium text-stone-900 text-sm line-clamp-2 leading-tight mb-1 group-hover:text-indigo-600 transition-colors">
                 {book.title}
               </h3>
-              <p className="text-xs text-stone-500 truncate">{book.author}</p>
+              <div className="flex justify-between items-center">
+                <p className="text-[10px] text-stone-500 truncate max-w-[70%]">{book.author}</p>
+                {book.lastRead && (
+                  <span className="text-[9px] text-stone-400 font-mono">
+                    {new Date(book.lastRead).toLocaleDateString()}
+                  </span>
+                )}
+              </div>
             </motion.div>
           ))}
         </div>

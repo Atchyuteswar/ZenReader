@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import ePub, { Book as EpubBook, Rendition } from 'epubjs';
 import { Book, Highlight, Bookmark } from '../types';
 import { storage } from '../lib/storage';
-import { ArrowLeft, ChevronLeft, ChevronRight, Settings, Type, Moon, Sun, Bookmark as BookmarkIcon, List, X, Trash2, Search as SearchIcon, Volume2, VolumeX, Loader2 } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight, Settings, Type, Moon, Sun, Bookmark as BookmarkIcon, List, X, Trash2, Search as SearchIcon, Volume2, VolumeX, Loader2, Bold } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateSpeech } from '../services/ttsService';
 
@@ -17,19 +17,25 @@ type Theme = 'light' | 'dark' | 'sepia';
 interface TOCItemProps {
   item: any;
   level?: number;
+  currentChapterHref?: string | null;
   onNavigate: (href: string) => void;
 }
 
-const TOCItem: React.FC<TOCItemProps> = ({ item, level = 0, onNavigate }) => {
+const TOCItem: React.FC<TOCItemProps> = ({ item, level = 0, currentChapterHref, onNavigate }) => {
   const [expanded, setExpanded] = useState(false);
   const hasChildren = item.subitems && item.subitems.length > 0;
+  const isActive = currentChapterHref && item.href && currentChapterHref.includes(item.href.split('#')[0]);
 
   return (
     <li>
       <div className="flex items-center group">
         <button 
           onClick={() => onNavigate(item.href)}
-          className="flex-1 text-left py-2 px-3 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 truncate text-sm"
+          className={`flex-1 text-left py-2 px-3 rounded-lg transition-colors truncate text-sm ${
+            isActive 
+              ? 'bg-indigo-50 text-indigo-700 font-medium dark:bg-indigo-900/30 dark:text-indigo-300' 
+              : 'hover:bg-black/5 dark:hover:bg-white/5'
+          }`}
           style={{ paddingLeft: `${level * 12 + 12}px` }}
         >
           {item.label}
@@ -39,14 +45,14 @@ const TOCItem: React.FC<TOCItemProps> = ({ item, level = 0, onNavigate }) => {
             onClick={(e) => { e.stopPropagation(); setExpanded(!expanded); }}
             className="p-2 opacity-50 hover:opacity-100"
           >
-            <ChevronRight className={`w-4 h-4 transition-transform ${expanded ? 'rotate-90' : ''}`} />
+            <ChevronRight className={`w-4 h-4 transition-transform ${expanded || isActive ? 'rotate-90' : ''}`} />
           </button>
         )}
       </div>
-      {hasChildren && expanded && (
+      {hasChildren && (expanded || isActive) && (
         <ul className="space-y-1 mt-1">
           {item.subitems.map((subitem: any, i: number) => (
-            <TOCItem key={i} item={subitem} level={level + 1} onNavigate={onNavigate} />
+            <TOCItem key={i} item={subitem} level={level + 1} currentChapterHref={currentChapterHref} onNavigate={onNavigate} />
           ))}
         </ul>
       )}
@@ -62,12 +68,14 @@ export function Reader({ book, onBack }: ReaderProps) {
   const [isReady, setIsReady] = useState(false);
   const [showControls, setShowControls] = useState(true);
   const [fontSize, setFontSize] = useState(100);
+  const [fontWeight, setFontWeight] = useState<'normal' | 'bold'>('normal');
   const [theme, setTheme] = useState<Theme>('light');
   const [currentCfi, setCurrentCfi] = useState<string>('');
   const [toc, setToc] = useState<any[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   const [menuTab, setMenuTab] = useState<'chapters' | 'bookmarks' | 'highlights' | 'search'>('chapters');
+  const [currentChapterHref, setCurrentChapterHref] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -84,6 +92,17 @@ export function Reader({ book, onBack }: ReaderProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const [furthestCfi, setFurthestCfi] = useState<string>('');
+  
+  const currentCfiRef = useRef(currentCfi);
+  const progressRef = useRef(progress);
+
+  useEffect(() => {
+    currentCfiRef.current = currentCfi;
+  }, [currentCfi]);
+
+  useEffect(() => {
+    progressRef.current = progress;
+  }, [progress]);
 
   // Initialize EPUB
   useEffect(() => {
@@ -160,6 +179,7 @@ export function Reader({ book, onBack }: ReaderProps) {
       setIsReady(true);
       applyTheme(theme);
       applyFontSize(fontSize);
+      applyFontWeight(fontWeight);
     };
 
     initBook();
@@ -167,18 +187,25 @@ export function Reader({ book, onBack }: ReaderProps) {
     // Event listeners
     rendition.on('relocated', (location: any) => {
       setCurrentCfi(location.start.cfi);
-      storage.updateProgress(book.id, location.start.cfi);
-      setSelection(null);
       
       if (bookRef.current) {
         const p = bookRef.current.locations.percentageFromCfi(location.start.cfi);
         const pPercent = p * 100;
         setProgress(pPercent);
         
+        storage.updateProgress(book.id, location.start.cfi, pPercent);
+        setSelection(null);
+        
         // Update furthest point if we moved forward
         if (pPercent > maxProgress) {
           setMaxProgress(pPercent);
           setFurthestCfi(location.start.cfi);
+        }
+
+        // Find current chapter
+        const spineItem = bookRef.current.spine.get(location.start.cfi);
+        if (spineItem) {
+          setCurrentChapterHref(spineItem.href);
         }
       }
     });
@@ -235,6 +262,21 @@ export function Reader({ book, onBack }: ReaderProps) {
     };
     window.addEventListener('keydown', handleKeyDown);
 
+    // Periodic save fallback (every 60s)
+    const saveInterval = setInterval(() => {
+      if (currentCfiRef.current && renditionRef.current) {
+        storage.updateProgress(book.id, currentCfiRef.current, progressRef.current);
+      }
+    }, 60000);
+
+    // Save on tab close
+    const handleBeforeUnload = () => {
+      if (currentCfiRef.current) {
+        storage.updateProgress(book.id, currentCfiRef.current, progressRef.current);
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+
     return () => {
       if (bookRef.current) {
         bookRef.current.destroy();
@@ -243,8 +285,10 @@ export function Reader({ book, onBack }: ReaderProps) {
         audioRef.current.pause();
         audioRef.current = null;
       }
+      clearInterval(saveInterval);
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('resize', handleResize);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
     };
   }, [book.id]);
 
@@ -338,6 +382,15 @@ export function Reader({ book, onBack }: ReaderProps) {
     if (!renditionRef.current) return;
     renditionRef.current.themes.fontSize(`${size}%`);
     setFontSize(size);
+  };
+
+  const applyFontWeight = (weight: 'normal' | 'bold') => {
+    if (!renditionRef.current) return;
+    renditionRef.current.themes.default({
+      'p': { 'font-weight': `${weight} !important` },
+      'body': { 'font-weight': `${weight} !important` }
+    });
+    setFontWeight(weight);
   };
 
   const next = () => renditionRef.current?.next();
@@ -508,6 +561,13 @@ export function Reader({ book, onBack }: ReaderProps) {
     }
   };
 
+  const handleBack = async () => {
+    if (currentCfi) {
+      await storage.updateProgress(book.id, currentCfi, progress);
+    }
+    onBack();
+  };
+
   return (
     <div className={`relative w-full h-screen flex flex-col overflow-hidden ${
       theme === 'dark' ? 'bg-[#1a1a1a]' : theme === 'sepia' ? 'bg-[#f6f1d1]' : 'bg-white'
@@ -524,7 +584,7 @@ export function Reader({ book, onBack }: ReaderProps) {
         }`}
       >
         <div className="flex items-center gap-2">
-          <button onClick={onBack} className="p-2 hover:bg-black/5 dark:hover:bg-white/10 rounded-full transition-colors">
+          <button onClick={handleBack} className="p-2 hover:bg-black/5 dark:hover:bg-white/10 rounded-full transition-colors">
             <ArrowLeft className="w-6 h-6" />
           </button>
           <button onClick={() => setShowMenu(true)} className="p-2 hover:bg-black/5 dark:hover:bg-white/10 rounded-full transition-colors">
@@ -603,7 +663,7 @@ export function Reader({ book, onBack }: ReaderProps) {
               </div>
             </div>
 
-            <div>
+            <div className="mb-4">
               <label className="text-xs font-bold opacity-50 uppercase tracking-wider mb-2 block">Font Size</label>
               <div className="flex items-center gap-4">
                 <button onClick={() => applyFontSize(Math.max(80, fontSize - 10))} className="p-2 hover:bg-black/5 dark:hover:bg-white/10 rounded-lg">
@@ -614,6 +674,25 @@ export function Reader({ book, onBack }: ReaderProps) {
                 </div>
                 <button onClick={() => applyFontSize(Math.min(200, fontSize + 10))} className="p-2 hover:bg-black/5 dark:hover:bg-white/10 rounded-lg">
                   <Type className="w-6 h-6" />
+                </button>
+              </div>
+            </div>
+
+            <div>
+              <label className="text-xs font-bold opacity-50 uppercase tracking-wider mb-2 block">Font Weight</label>
+              <div className="flex gap-2">
+                <button 
+                  onClick={() => applyFontWeight('normal')}
+                  className={`flex-1 py-2 rounded-lg border flex items-center justify-center gap-2 ${fontWeight === 'normal' ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-stone-200 text-stone-600 dark:border-neutral-700'}`}
+                >
+                  <span className="text-xs">Normal</span>
+                </button>
+                <button 
+                  onClick={() => applyFontWeight('bold')}
+                  className={`flex-1 py-2 rounded-lg border flex items-center justify-center gap-2 ${fontWeight === 'bold' ? 'border-indigo-500 bg-indigo-50 text-indigo-700' : 'border-stone-200 text-stone-600 dark:border-neutral-700'}`}
+                >
+                  <Bold className="w-4 h-4" />
+                  <span className="text-xs font-bold">Bold</span>
                 </button>
               </div>
             </div>
@@ -697,7 +776,7 @@ export function Reader({ book, onBack }: ReaderProps) {
                     <ul className="space-y-1">
                       {toc.length > 0 ? (
                         toc.map((item, i) => (
-                          <TOCItem key={i} item={item} onNavigate={goToLocation} />
+                          <TOCItem key={i} item={item} currentChapterHref={currentChapterHref} onNavigate={goToLocation} />
                         ))
                       ) : (
                         <li className="text-stone-500 text-sm italic p-2">No table of contents found.</li>

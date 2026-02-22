@@ -29,10 +29,13 @@ export const storage = {
     await localforage.removeItem(id);
   },
   
-  async updateProgress(id: string, cfi: string): Promise<void> {
+  async updateProgress(id: string, cfi: string, percentage?: number): Promise<void> {
     const book = await this.getBook(id);
     if (book) {
       book.progress = cfi;
+      if (percentage !== undefined) {
+        book.progressPercentage = percentage;
+      }
       book.lastRead = Date.now();
       await this.saveBook(book);
     }

@@ -20,6 +20,7 @@ export interface Book {
   addedAt: number;
   lastRead?: number;
   progress?: string; // CFI location
+  progressPercentage?: number; // 0-100
   highlights?: Highlight[];
   bookmarks?: Bookmark[];
 }
