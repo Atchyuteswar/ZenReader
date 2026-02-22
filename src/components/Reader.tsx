@@ -2,8 +2,9 @@ import React, { useEffect, useRef, useState } from 'react';
 import ePub, { Book as EpubBook, Rendition } from 'epubjs';
 import { Book, Highlight, Bookmark } from '../types';
 import { storage } from '../lib/storage';
-import { ArrowLeft, ChevronLeft, ChevronRight, Settings, Type, Moon, Sun, Bookmark as BookmarkIcon, List, X, Trash2, Search as SearchIcon } from 'lucide-react';
+import { ArrowLeft, ChevronLeft, ChevronRight, Settings, Type, Moon, Sun, Bookmark as BookmarkIcon, List, X, Trash2, Search as SearchIcon, Volume2, VolumeX, Loader2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { generateSpeech } from '../services/ttsService';
 
 interface ReaderProps {
   book: Book;
@@ -66,7 +67,7 @@ export function Reader({ book, onBack }: ReaderProps) {
   const [toc, setToc] = useState<any[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
-  const [menuTab, setMenuTab] = useState<'chapters' | 'bookmarks' | 'search'>('chapters');
+  const [menuTab, setMenuTab] = useState<'chapters' | 'bookmarks' | 'highlights' | 'search'>('chapters');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [isSearching, setIsSearching] = useState(false);
@@ -76,6 +77,11 @@ export function Reader({ book, onBack }: ReaderProps) {
   const [bookmarks, setBookmarks] = useState<Bookmark[]>(book.bookmarks || []);
   const [selection, setSelection] = useState<{ cfiRange: string; x: number; y: number } | null>(null);
   const [activeFootnote, setActiveFootnote] = useState<string | null>(null);
+  const [progress, setProgress] = useState(0);
+  const [maxProgress, setMaxProgress] = useState(0);
+  const [isReadingAloud, setIsReadingAloud] = useState(false);
+  const [isGeneratingSpeech, setIsGeneratingSpeech] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const [furthestCfi, setFurthestCfi] = useState<string>('');
 
@@ -94,21 +100,23 @@ export function Reader({ book, onBack }: ReaderProps) {
     });
     renditionRef.current = rendition;
 
+    // Inject highlight styles into every chapter
+    rendition.hooks.content.register((contents: any) => {
+      contents.addStylesheetRules({
+        '.hl-yellow': { 'fill': '#ffeb3b !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
+        '.hl-green': { 'fill': '#a5d6a7 !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
+        '.hl-blue': { 'fill': '#90caf9 !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
+        '.hl-red': { 'fill': '#ef9a9a !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
+        '.hl-custom': { 'cursor': 'pointer !important', 'pointer-events': 'auto !important' }
+      });
+    });
+
     const initBook = async () => {
       // Set default styles
       rendition.themes.default({
         'p': { 'font-family': 'Helvetica, Arial, sans-serif !important', 'font-size': '100% !important', 'line-height': '1.6 !important' },
         'h1, h2, h3, h4, h5, h6': { 'font-family': 'Georgia, serif !important' }
       });
-
-      // Inject highlight styles
-      rendition.themes.register('highlights', {
-        '.hl-yellow': { 'fill': '#ffeb3b', 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply' },
-        '.hl-green': { 'fill': '#a5d6a7', 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply' },
-        '.hl-blue': { 'fill': '#90caf9', 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply' },
-        '.hl-red': { 'fill': '#ef9a9a', 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply' },
-      });
-      rendition.themes.select('highlights'); 
       
       // Load saved progress or start from beginning
       await rendition.display(book.progress || undefined);
@@ -119,6 +127,12 @@ export function Reader({ book, onBack }: ReaderProps) {
       // Load TOC
       const navigation = await epub.loaded.navigation;
       setToc(navigation.toc);
+
+      // Generate locations for progress tracking
+      await epub.locations.generate(1000);
+      const initialProgress = epub.locations.percentageFromCfi(book.progress || '');
+      setProgress(initialProgress * 100);
+      setMaxProgress(initialProgress * 100);
       
       // Restore highlights
       if (book.highlights) {
@@ -129,13 +143,16 @@ export function Reader({ book, onBack }: ReaderProps) {
             '#90caf9': 'hl-blue',
             '#ef9a9a': 'hl-red'
           };
-          const className = colorMap[h.color] || 'hl-yellow';
+          const className = colorMap[h.color];
+          const styles = className ? {} : { fill: h.color, 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply', 'cursor': 'pointer', 'pointer-events': 'auto' };
+          
           rendition.annotations.add(
               'highlight', 
               h.cfiRange, 
               {}, 
               (e: any) => onHighlightClick(h.cfiRange), 
-              className
+              className || 'hl-custom',
+              styles
           );
         });
       }
@@ -153,7 +170,17 @@ export function Reader({ book, onBack }: ReaderProps) {
       storage.updateProgress(book.id, location.start.cfi);
       setSelection(null);
       
-      setFurthestCfi(location.start.cfi);
+      if (bookRef.current) {
+        const p = bookRef.current.locations.percentageFromCfi(location.start.cfi);
+        const pPercent = p * 100;
+        setProgress(pPercent);
+        
+        // Update furthest point if we moved forward
+        if (pPercent > maxProgress) {
+          setMaxProgress(pPercent);
+          setFurthestCfi(location.start.cfi);
+        }
+      }
     });
 
     rendition.on('selected', (cfiRange: string, contents: any) => {
@@ -211,6 +238,10 @@ export function Reader({ book, onBack }: ReaderProps) {
     return () => {
       if (bookRef.current) {
         bookRef.current.destroy();
+      }
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
       }
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('resize', handleResize);
@@ -321,62 +352,29 @@ export function Reader({ book, onBack }: ReaderProps) {
     setSearchResults([]);
     
     try {
-      // Iterate through spine items to search
-      // Note: This can be slow for large books. In a real app, we'd index this or use a worker.
       const results: any[] = [];
+      const spine = bookRef.current.spine;
       
-      // We limit to first 10 chapters for demo performance if needed, or just try all.
-      // Let's try to search concurrently but limit concurrency? 
-      // For now, simple sequential or Promise.all
-      
-      const spineItems = bookRef.current.spine.spineItems;
-      
-      for (const item of spineItems) {
-        // Load the document text
-        // We use a lightweight load if possible, but epubjs load returns the doc.
-        // We need to be careful not to render it.
+      // Use Promise.all for faster searching across chapters
+      const searchPromises = spine.spineItems.map(async (item: any) => {
         try {
-            // Accessing the raw text might be better if available, but usually we need to load the HTML.
-            // item.load() loads the resource.
-            const doc = await item.load(bookRef.current.load.bind(bookRef.current));
-            const text = doc.body.textContent || '';
-            const lowerText = text.toLowerCase();
-            const lowerQuery = searchQuery.toLowerCase();
-            
-            let index = lowerText.indexOf(lowerQuery);
-            while (index !== -1) {
-                // Create a rough excerpt
-                const start = Math.max(0, index - 30);
-                const end = Math.min(text.length, index + lowerQuery.length + 30);
-                const excerpt = text.substring(start, end).replace(/\s+/g, ' ');
-                
-                // We need a CFI for this result. 
-                // Generating CFI from text index is hard without the renderer.
-                // However, epub.js has a `find` method on the rendition? No.
-                // But `section.find(query)` exists?
-                // Actually, let's use the built-in find if we can rely on it, but it's often missing or broken in v0.3.
-                // Let's try to use the `cfiFromElement` if we can find the element.
-                
-                // Alternative: Use `item.find(query)` if it exists.
-                // Checking epub.js source/docs... `Section` has `find`.
-                
-                results.push({
-                    cfi: item.href, // This is just the chapter link, not specific CFI. Better than nothing.
-                    label: `...${excerpt}...`,
-                    href: item.href
-                });
-                
-                // Limit results per chapter
-                if (results.length > 50) break; 
-                
-                index = lowerText.indexOf(lowerQuery, index + 1);
-            }
+          // Section.find(query) returns results with precise CFIs
+          const sectionResults = await item.find(searchQuery);
+          return sectionResults.map((res: any) => ({
+            cfi: res.cfi,
+            label: res.excerpt,
+            href: res.cfi // Navigation works with CFIs directly
+          }));
         } catch (err) {
-            console.warn('Error searching chapter', err);
+          console.warn('Error searching chapter', item.href, err);
+          return [];
         }
-      }
+      });
+
+      const allResults = await Promise.all(searchPromises);
+      const flattenedResults = allResults.flat();
       
-      setSearchResults(results);
+      setSearchResults(flattenedResults);
     } catch (error) {
       console.error('Search failed', error);
     } finally {
@@ -404,17 +402,17 @@ export function Reader({ book, onBack }: ReaderProps) {
       '#90caf9': 'hl-blue',
       '#ef9a9a': 'hl-red'
     };
-    // If custom color, we might need dynamic style injection or just use closest class.
-    // For now, let's just use the style attribute if possible? 
-    // Epubjs annotations allow styles object.
     
-    // We will use the callback to handle clicks
+    const className = colorMap[color];
+    const styles = className ? {} : { fill: color, 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply', 'cursor': 'pointer', 'pointer-events': 'auto' };
+
     renditionRef.current.annotations.add(
         'highlight', 
         selection.cfiRange, 
         {}, 
         (e: any) => onHighlightClick(selection.cfiRange), 
-        colorMap[color] || 'hl-yellow'
+        className || 'hl-custom',
+        styles
     );
     
     // If it's a custom color not in map, we might want to inject a style.
@@ -465,6 +463,51 @@ export function Reader({ book, onBack }: ReaderProps) {
     setShowMenu(false);
   };
 
+  const handleTTS = async () => {
+    if (isReadingAloud) {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+      setIsReadingAloud(false);
+      return;
+    }
+
+    if (!renditionRef.current) return;
+
+    setIsGeneratingSpeech(true);
+    try {
+      // Extract text from current page
+      const contents = renditionRef.current.getContents();
+      let text = "";
+      contents.forEach((content: any) => {
+        text += content.document.body.innerText + " ";
+      });
+
+      if (!text.trim()) {
+        setIsGeneratingSpeech(false);
+        return;
+      }
+
+      const base64Audio = await generateSpeech(text.substring(0, 3000)); // Limit text length for API
+      if (base64Audio) {
+        const audioUrl = `data:audio/mpeg;base64,${base64Audio}`;
+        const audio = new Audio(audioUrl);
+        audioRef.current = audio;
+        audio.onended = () => {
+          setIsReadingAloud(false);
+          audioRef.current = null;
+        };
+        audio.play();
+        setIsReadingAloud(true);
+      }
+    } catch (error) {
+      console.error("TTS failed", error);
+    } finally {
+      setIsGeneratingSpeech(false);
+    }
+  };
+
   return (
     <div className={`relative w-full h-screen flex flex-col overflow-hidden ${
       theme === 'dark' ? 'bg-[#1a1a1a]' : theme === 'sepia' ? 'bg-[#f6f1d1]' : 'bg-white'
@@ -494,6 +537,20 @@ export function Reader({ book, onBack }: ReaderProps) {
         </h2>
 
         <div className="flex items-center gap-2">
+          <button 
+            onClick={handleTTS}
+            disabled={isGeneratingSpeech}
+            className={`p-2 rounded-full transition-colors hover:bg-black/5 dark:hover:bg-white/10 ${isReadingAloud ? 'text-indigo-500' : ''}`}
+            title={isReadingAloud ? "Stop Reading" : "Read Aloud"}
+          >
+            {isGeneratingSpeech ? (
+              <Loader2 className="w-6 h-6 animate-spin" />
+            ) : isReadingAloud ? (
+              <VolumeX className="w-6 h-6" />
+            ) : (
+              <Volume2 className="w-6 h-6" />
+            )}
+          </button>
           <button 
             onClick={toggleBookmark}
             className={`p-2 rounded-full transition-colors hover:bg-black/5 dark:hover:bg-white/10 ${isBookmarked ? 'text-indigo-500' : ''}`}
@@ -614,6 +671,16 @@ export function Reader({ book, onBack }: ReaderProps) {
                     Bookmarks
                   </button>
                   <button 
+                    onClick={() => setMenuTab('highlights')}
+                    className={`flex-1 py-3 text-sm font-medium transition-colors ${
+                      menuTab === 'highlights' 
+                        ? 'text-indigo-600 border-b-2 border-indigo-600' 
+                        : 'text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-200'
+                    }`}
+                  >
+                    Highlights
+                  </button>
+                  <button 
                     onClick={() => setMenuTab('search')}
                     className={`flex-1 py-3 text-sm font-medium transition-colors ${
                       menuTab === 'search' 
@@ -663,6 +730,35 @@ export function Reader({ book, onBack }: ReaderProps) {
                         <li className="text-stone-500 text-sm italic p-2 text-center mt-10">
                           <BookmarkIcon className="w-8 h-8 mx-auto mb-2 opacity-20" />
                           No bookmarks yet.
+                        </li>
+                      )}
+                    </ul>
+                  ) : menuTab === 'highlights' ? (
+                    <ul className="space-y-1">
+                      {highlights.length > 0 ? (
+                        highlights.map((highlight, i) => (
+                          <li key={i} className="flex items-center group">
+                            <button 
+                              onClick={() => goToLocation(highlight.cfiRange)}
+                              className="flex-1 text-left py-2 px-3 rounded-lg hover:bg-black/5 dark:hover:bg-white/5 truncate text-sm flex items-center gap-2"
+                            >
+                              <div className="w-3 h-3 rounded-full shrink-0" style={{ backgroundColor: highlight.color }} />
+                              <div className="flex flex-col truncate">
+                                <span className="truncate opacity-70 italic">Highlight at {highlight.cfiRange.substring(0, 20)}...</span>
+                                <span className="text-[10px] opacity-50 font-mono">{new Date(highlight.created).toLocaleDateString()}</span>
+                              </div>
+                            </button>
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); setConfirmDeleteHighlight(highlight.cfiRange); }}
+                              className="p-2 opacity-0 group-hover:opacity-100 hover:text-red-500 transition-opacity"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </li>
+                        ))
+                      ) : (
+                        <li className="text-stone-500 text-sm italic p-2 text-center mt-10">
+                          No highlights yet.
                         </li>
                       )}
                     </ul>
@@ -878,25 +974,55 @@ export function Reader({ book, onBack }: ReaderProps) {
         
         <div className="text-xs opacity-50 font-mono flex items-center gap-2">
           {/* Auto-bookmark indicator */}
-          {furthestCfi && currentCfi !== furthestCfi ? (
-             <button 
-                onClick={() => goToLocation(furthestCfi)}
-                className="flex items-center gap-1 text-[10px] uppercase tracking-wider text-indigo-500 hover:text-indigo-600 font-bold animate-pulse"
-             >
-                <BookmarkIcon className="w-3 h-3 fill-current" />
-                <span>Return to Latest</span>
-             </button>
-          ) : (
-             <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider">
-                <BookmarkIcon className="w-3 h-3 fill-current" />
-                <span>Saved</span>
-             </div>
-          )}
+          <div className="flex flex-col items-center gap-1">
+            <div className="flex items-center gap-1 text-[10px] uppercase tracking-wider">
+              <BookmarkIcon className="w-3 h-3 fill-current" />
+              <span>{progress > maxProgress - 1 ? 'Reading' : 'Reviewing'}</span>
+            </div>
+            <span className="text-[10px] opacity-50">{Math.round(progress)}%</span>
+          </div>
         </div>
 
         <button onClick={next} className="p-3 hover:bg-black/5 dark:hover:bg-white/10 rounded-full transition-colors">
           <ChevronRight className="w-8 h-8" />
         </button>
+
+        {/* Progress Bar & Auto-Bookmark Scrubber */}
+        <div 
+          className="absolute bottom-0 left-0 right-0 h-1.5 bg-black/5 dark:bg-white/5 cursor-pointer group"
+          onClick={(e) => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const x = e.clientX - rect.left;
+            const percentage = x / rect.width;
+            const cfi = bookRef.current?.locations.cfiFromPercentage(percentage);
+            if (cfi) renditionRef.current?.display(cfi);
+          }}
+        >
+          {/* Main Progress */}
+          <motion.div 
+            initial={{ width: 0 }}
+            animate={{ width: `${progress}%` }}
+            className="h-full bg-indigo-500/40"
+          />
+          
+          {/* Furthest Point (Auto-Bookmark) */}
+          <motion.div 
+            initial={{ width: 0 }}
+            animate={{ width: `${maxProgress}%` }}
+            className="absolute top-0 left-0 h-full bg-indigo-500"
+          />
+
+          {/* Furthest Point Marker */}
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              if (furthestCfi) renditionRef.current?.display(furthestCfi);
+            }}
+            className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-indigo-600 rounded-full border-2 border-white dark:border-neutral-900 shadow-sm opacity-0 group-hover:opacity-100 transition-opacity z-10"
+            style={{ left: `${maxProgress}%`, marginLeft: '-6px' }}
+            title="Return to furthest point"
+          />
+        </div>
       </motion.div>
     </div>
   );
