@@ -93,9 +93,11 @@ export function Reader({ book, onBack }: ReaderProps) {
   const audioRef = useRef<HTMLAudioElement | null>(null);
 
   const [furthestCfi, setFurthestCfi] = useState<string>('');
+  const [error, setError] = useState<string | null>(null);
   
   const currentCfiRef = useRef(currentCfi);
   const progressRef = useRef(progress);
+  const selectionRef = useRef(selection);
 
   useEffect(() => {
     currentCfiRef.current = currentCfi;
@@ -104,6 +106,10 @@ export function Reader({ book, onBack }: ReaderProps) {
   useEffect(() => {
     progressRef.current = progress;
   }, [progress]);
+
+  useEffect(() => {
+    selectionRef.current = selection;
+  }, [selection]);
 
   const { user } = useAuth();
   
@@ -152,14 +158,21 @@ export function Reader({ book, onBack }: ReaderProps) {
             });
             if (response.ok) {
               bookData = await response.arrayBuffer();
+            } else {
+              throw new Error('Failed to download book');
             }
           }
-        } catch (error) {
-          console.error('Failed to load book data', error);
+        } catch (err) {
+          console.error('Failed to load book data', err);
+          setError('Failed to load book content. Please try again.');
+          return;
         }
       }
 
-      if (!bookData) return;
+      if (!bookData) {
+        setError('No book content available.');
+        return;
+      }
 
       const epub = ePub(bookData);
       bookRef.current = epub;
@@ -210,8 +223,9 @@ export function Reader({ book, onBack }: ReaderProps) {
         });
       });
       
-      // Handle clicks (selection clear & footnotes)
+      // Handle clicks (selection clear & footnotes & HUD toggle)
       rendition.on('click', (e: any) => {
+        const hadSelection = !!selectionRef.current;
         setSelection(null);
 
         const link = e.target.closest('a');
@@ -233,6 +247,8 @@ export function Reader({ book, onBack }: ReaderProps) {
             e.preventDefault();
             handleFootnote(href);
           }
+        } else if (!hadSelection) {
+          setShowControls(prev => !prev);
         }
       });
 
@@ -1064,7 +1080,17 @@ export function Reader({ book, onBack }: ReaderProps) {
           if (!selection) setShowControls(!showControls);
         }}
       >
-        {!isReady && (
+        {error ? (
+          <div className="absolute inset-0 flex flex-col items-center justify-center p-4 text-center">
+            <p className="text-red-500 font-medium mb-2">{error}</p>
+            <button 
+              onClick={onBack}
+              className="px-4 py-2 bg-stone-200 dark:bg-neutral-700 rounded-lg text-sm"
+            >
+              Back to Library
+            </button>
+          </div>
+        ) : !isReady && (
           <div className="absolute inset-0 flex items-center justify-center">
             <div className="w-8 h-8 border-4 border-indigo-500 border-t-transparent rounded-full animate-spin"></div>
           </div>
