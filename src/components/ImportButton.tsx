@@ -1,6 +1,7 @@
 import React, { useRef, useState } from 'react';
 import { Upload, Loader2 } from 'lucide-react';
 import { importEpub } from '../services/importService';
+import { useAuth } from '../context/AuthContext';
 
 interface ImportButtonProps {
   onImportComplete: () => void;
@@ -9,6 +10,7 @@ interface ImportButtonProps {
 export function ImportButton({ onImportComplete }: ImportButtonProps) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const [loading, setLoading] = useState(false);
+  const { user } = useAuth();
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -16,7 +18,8 @@ export function ImportButton({ onImportComplete }: ImportButtonProps) {
 
     setLoading(true);
     try {
-      await importEpub(file);
+      const token = localStorage.getItem('token') || undefined;
+      await importEpub(file, token);
       onImportComplete();
     } catch (error) {
       console.error('Failed to import book:', error);

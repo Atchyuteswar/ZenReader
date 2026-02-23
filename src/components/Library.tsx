@@ -1,10 +1,11 @@
 import React, { useEffect, useState } from 'react';
 import { Book } from '../types';
-import { storage } from '../lib/storage';
+import { bookService } from '../services/bookService';
 import { ImportButton } from './ImportButton';
-import { BookOpen, Trash2, Upload } from 'lucide-react';
+import { BookOpen, Trash2, Upload, LogOut } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { importEpub } from '../services/importService';
+import { useAuth } from '../context/AuthContext';
 
 interface LibraryProps {
   onSelectBook: (book: Book) => void;
@@ -13,13 +14,15 @@ interface LibraryProps {
 export function Library({ onSelectBook }: LibraryProps) {
   const [books, setBooks] = useState<Book[]>([]);
   const [loading, setLoading] = useState(true);
+  const { user, logout } = useAuth();
 
   const [isDragging, setIsDragging] = useState(false);
 
   const loadBooks = async () => {
     setLoading(true);
     try {
-      const loadedBooks = await storage.getBooks();
+      const token = localStorage.getItem('token') || undefined;
+      const loadedBooks = await bookService.getBooks(token);
       setBooks(loadedBooks);
     } catch (err) {
       console.error(err);
@@ -30,7 +33,7 @@ export function Library({ onSelectBook }: LibraryProps) {
 
   useEffect(() => {
     loadBooks();
-  }, []);
+  }, [user]);
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault();
@@ -49,7 +52,8 @@ export function Library({ onSelectBook }: LibraryProps) {
     if (file && file.name.endsWith('.epub')) {
       setLoading(true);
       try {
-        await importEpub(file);
+        const token = localStorage.getItem('token') || undefined;
+        await importEpub(file, token);
         loadBooks();
       } catch (err) {
         console.error(err);
@@ -63,7 +67,8 @@ export function Library({ onSelectBook }: LibraryProps) {
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (confirm('Are you sure you want to delete this book?')) {
-      await storage.deleteBook(id);
+      const token = localStorage.getItem('token') || undefined;
+      await bookService.deleteBook(id, token);
       loadBooks();
     }
   };
@@ -94,9 +99,22 @@ export function Library({ onSelectBook }: LibraryProps) {
       <header className="flex justify-between items-center mb-10 max-w-7xl mx-auto">
         <div>
           <h1 className="text-3xl font-serif font-bold text-stone-900 tracking-tight">Library</h1>
-          <p className="text-stone-500 mt-1">Your personal collection</p>
+          <p className="text-stone-500 mt-1">
+            {user ? `Welcome, ${user.name}` : 'Your personal collection'}
+          </p>
         </div>
-        <ImportButton onImportComplete={loadBooks} />
+        <div className="flex items-center gap-4">
+          <ImportButton onImportComplete={loadBooks} />
+          {user && (
+            <button 
+              onClick={logout}
+              className="p-2 text-stone-500 hover:text-stone-800 hover:bg-stone-200 rounded-full transition-colors"
+              title="Logout"
+            >
+              <LogOut className="w-5 h-5" />
+            </button>
+          )}
+        </div>
       </header>
 
       {loading ? (

@@ -1,3 +1,9 @@
+declare global {
+  interface Window {
+    google: any;
+  }
+}
+
 export interface Highlight {
   cfiRange: string;
   color: string;
@@ -16,7 +22,8 @@ export interface Book {
   title: string;
   author: string;
   cover?: string; // Base64 or URL
-  data: ArrayBuffer; // The EPUB file content
+  data?: ArrayBuffer; // The EPUB file content (local)
+  url?: string; // The EPUB file URL (cloud)
   addedAt: number;
   lastRead?: number;
   progress?: string; // CFI location
