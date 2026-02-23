@@ -1,9 +1,9 @@
 import ePub from 'epubjs';
 import { v4 as uuidv4 } from 'uuid';
 import { Book } from '../types';
-import { storage } from '../lib/storage';
+import { bookService } from './bookService';
 
-export async function importEpub(file: File): Promise<void> {
+export async function importEpub(file: File, token?: string): Promise<void> {
   const arrayBuffer = await file.arrayBuffer();
   const book = ePub(arrayBuffer);
   
@@ -32,5 +32,5 @@ export async function importEpub(file: File): Promise<void> {
     addedAt: Date.now(),
   };
 
-  await storage.saveBook(newBook);
+  await bookService.saveBook(newBook, file, token);
 }

@@ -1,7 +1,8 @@
 import React, { useEffect, useRef, useState } from 'react';
 import ePub, { Book as EpubBook, Rendition } from 'epubjs';
 import { Book, Highlight, Bookmark } from '../types';
-import { storage } from '../lib/storage';
+import { bookService } from '../services/bookService';
+import { useAuth } from '../context/AuthContext';
 import { ArrowLeft, ChevronLeft, ChevronRight, Settings, Type, Moon, Sun, Bookmark as BookmarkIcon, List, X, Trash2, Search as SearchIcon, Volume2, VolumeX, Loader2, Bold } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { generateSpeech } from '../services/ttsService';
@@ -104,148 +105,11 @@ export function Reader({ book, onBack }: ReaderProps) {
     progressRef.current = progress;
   }, [progress]);
 
+  const { user } = useAuth();
+  
   // Initialize EPUB
   useEffect(() => {
     if (!viewerRef.current) return;
-
-    const epub = ePub(book.data);
-    bookRef.current = epub;
-
-    const rendition = epub.renderTo(viewerRef.current, {
-      width: '100%',
-      height: '100%',
-      flow: 'paginated',
-      manager: 'default',
-    });
-    renditionRef.current = rendition;
-
-    // Inject highlight styles into every chapter
-    rendition.hooks.content.register((contents: any) => {
-      contents.addStylesheetRules({
-        '.hl-yellow': { 'fill': '#ffeb3b !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
-        '.hl-green': { 'fill': '#a5d6a7 !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
-        '.hl-blue': { 'fill': '#90caf9 !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
-        '.hl-red': { 'fill': '#ef9a9a !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
-        '.hl-custom': { 'cursor': 'pointer !important', 'pointer-events': 'auto !important' }
-      });
-    });
-
-    const initBook = async () => {
-      // Set default styles
-      rendition.themes.default({
-        'p': { 'font-family': 'Helvetica, Arial, sans-serif !important', 'font-size': '100% !important', 'line-height': '1.6 !important' },
-        'h1, h2, h3, h4, h5, h6': { 'font-family': 'Georgia, serif !important' }
-      });
-      
-      // Load saved progress or start from beginning
-      await rendition.display(book.progress || undefined);
-      if (book.progress) {
-          setFurthestCfi(book.progress);
-      }
-      
-      // Load TOC
-      const navigation = await epub.loaded.navigation;
-      setToc(navigation.toc);
-
-      // Generate locations for progress tracking
-      await epub.locations.generate(1000);
-      const initialProgress = epub.locations.percentageFromCfi(book.progress || '');
-      setProgress(initialProgress * 100);
-      setMaxProgress(initialProgress * 100);
-      
-      // Restore highlights
-      if (book.highlights) {
-        book.highlights.forEach(h => {
-          const colorMap: Record<string, string> = {
-            '#ffeb3b': 'hl-yellow',
-            '#a5d6a7': 'hl-green',
-            '#90caf9': 'hl-blue',
-            '#ef9a9a': 'hl-red'
-          };
-          const className = colorMap[h.color];
-          const styles = className ? {} : { fill: h.color, 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply', 'cursor': 'pointer', 'pointer-events': 'auto' };
-          
-          rendition.annotations.add(
-              'highlight', 
-              h.cfiRange, 
-              {}, 
-              (e: any) => onHighlightClick(h.cfiRange), 
-              className || 'hl-custom',
-              styles
-          );
-        });
-      }
-
-      setIsReady(true);
-      applyTheme(theme);
-      applyFontSize(fontSize);
-      applyFontWeight(fontWeight);
-    };
-
-    initBook();
-
-    // Event listeners
-    rendition.on('relocated', (location: any) => {
-      setCurrentCfi(location.start.cfi);
-      
-      if (bookRef.current) {
-        const p = bookRef.current.locations.percentageFromCfi(location.start.cfi);
-        const pPercent = p * 100;
-        setProgress(pPercent);
-        
-        storage.updateProgress(book.id, location.start.cfi, pPercent);
-        setSelection(null);
-        
-        // Update furthest point if we moved forward
-        if (pPercent > maxProgress) {
-          setMaxProgress(pPercent);
-          setFurthestCfi(location.start.cfi);
-        }
-
-        // Find current chapter
-        const spineItem = bookRef.current.spine.get(location.start.cfi);
-        if (spineItem) {
-          setCurrentChapterHref(spineItem.href);
-        }
-      }
-    });
-
-    rendition.on('selected', (cfiRange: string, contents: any) => {
-      const range = rendition.getRange(cfiRange);
-      const rect = range.getBoundingClientRect();
-      
-      setSelection({
-        cfiRange,
-        x: rect.left + rect.width / 2,
-        y: rect.top - 10 // Position above
-      });
-    });
-    
-    // Handle clicks (selection clear & footnotes)
-    rendition.on('click', (e: any) => {
-      setSelection(null);
-
-      const link = e.target.closest('a');
-      if (link) {
-        const href = link.getAttribute('href');
-        const epubType = link.getAttribute('epub:type');
-        const role = link.getAttribute('role');
-        const classList = link.classList;
-        
-        // Heuristic for footnotes
-        const isFootnote = 
-          epubType === 'noteref' || 
-          role === 'doc-noteref' || 
-          classList.contains('footnote') || 
-          classList.contains('note') ||
-          (href && (href.includes('fn') || href.includes('note')));
-
-        if (isFootnote && href) {
-          e.preventDefault();
-          handleFootnote(href);
-        }
-      }
-    });
 
     // Handle resize
     const handleResize = () => {
@@ -253,28 +117,195 @@ export function Reader({ book, onBack }: ReaderProps) {
         renditionRef.current.resize();
       }
     };
-    window.addEventListener('resize', handleResize);
 
     // Keyboard navigation
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'ArrowRight') next();
       if (e.key === 'ArrowLeft') prev();
     };
-    window.addEventListener('keydown', handleKeyDown);
 
     // Periodic save fallback (every 60s)
     const saveInterval = setInterval(() => {
       if (currentCfiRef.current && renditionRef.current) {
-        storage.updateProgress(book.id, currentCfiRef.current, progressRef.current);
+        const token = localStorage.getItem('token') || undefined;
+        bookService.updateProgress(book.id, currentCfiRef.current, progressRef.current, token);
       }
     }, 60000);
 
     // Save on tab close
     const handleBeforeUnload = () => {
       if (currentCfiRef.current) {
-        storage.updateProgress(book.id, currentCfiRef.current, progressRef.current);
+        const token = localStorage.getItem('token') || undefined;
+        bookService.updateProgress(book.id, currentCfiRef.current, progressRef.current, token);
       }
     };
+
+    const loadBook = async () => {
+      let bookData: ArrayBuffer | string = book.data || '';
+
+      if (!bookData && book.id) {
+        try {
+          const token = localStorage.getItem('token');
+          if (token) {
+            const response = await fetch(`/api/books/${book.id}/download`, {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (response.ok) {
+              bookData = await response.arrayBuffer();
+            }
+          }
+        } catch (error) {
+          console.error('Failed to load book data', error);
+        }
+      }
+
+      if (!bookData) return;
+
+      const epub = ePub(bookData);
+      bookRef.current = epub;
+
+      const rendition = epub.renderTo(viewerRef.current, {
+        width: '100%',
+        height: '100%',
+        flow: 'paginated',
+        manager: 'default',
+      });
+      renditionRef.current = rendition;
+
+      // Event listeners
+      rendition.on('relocated', (location: any) => {
+        setCurrentCfi(location.start.cfi);
+        
+        if (bookRef.current) {
+          const p = bookRef.current.locations.percentageFromCfi(location.start.cfi);
+          const pPercent = p * 100;
+          setProgress(pPercent);
+          
+          const token = localStorage.getItem('token') || undefined;
+          bookService.updateProgress(book.id, location.start.cfi, pPercent, token);
+          setSelection(null);
+          
+          // Update furthest point if we moved forward
+          if (pPercent > maxProgress) {
+            setMaxProgress(pPercent);
+            setFurthestCfi(location.start.cfi);
+          }
+
+          // Find current chapter
+          const spineItem = bookRef.current.spine.get(location.start.cfi);
+          if (spineItem) {
+            setCurrentChapterHref(spineItem.href);
+          }
+        }
+      });
+
+      rendition.on('selected', (cfiRange: string, contents: any) => {
+        const range = rendition.getRange(cfiRange);
+        const rect = range.getBoundingClientRect();
+        
+        setSelection({
+          cfiRange,
+          x: rect.left + rect.width / 2,
+          y: rect.top - 10 // Position above
+        });
+      });
+      
+      // Handle clicks (selection clear & footnotes)
+      rendition.on('click', (e: any) => {
+        setSelection(null);
+
+        const link = e.target.closest('a');
+        if (link) {
+          const href = link.getAttribute('href');
+          const epubType = link.getAttribute('epub:type');
+          const role = link.getAttribute('role');
+          const classList = link.classList;
+          
+          // Heuristic for footnotes
+          const isFootnote = 
+            epubType === 'noteref' || 
+            role === 'doc-noteref' || 
+            classList.contains('footnote') || 
+            classList.contains('note') ||
+            (href && (href.includes('fn') || href.includes('note')));
+
+          if (isFootnote && href) {
+            e.preventDefault();
+            handleFootnote(href);
+          }
+        }
+      });
+
+      // Inject highlight styles into every chapter
+      rendition.hooks.content.register((contents: any) => {
+        contents.addStylesheetRules({
+          '.hl-yellow': { 'fill': '#ffeb3b !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
+          '.hl-green': { 'fill': '#a5d6a7 !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
+          '.hl-blue': { 'fill': '#90caf9 !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
+          '.hl-red': { 'fill': '#ef9a9a !important', 'fill-opacity': '0.3 !important', 'mix-blend-mode': 'multiply !important', 'cursor': 'pointer !important', 'pointer-events': 'auto !important' },
+          '.hl-custom': { 'cursor': 'pointer !important', 'pointer-events': 'auto !important' }
+        });
+      });
+
+      const initBook = async () => {
+        // Set default styles
+        rendition.themes.default({
+          'p': { 'font-family': 'Helvetica, Arial, sans-serif !important', 'font-size': '100% !important', 'line-height': '1.6 !important' },
+          'h1, h2, h3, h4, h5, h6': { 'font-family': 'Georgia, serif !important' }
+        });
+        
+        // Load saved progress or start from beginning
+        await rendition.display(book.progress || undefined);
+        if (book.progress) {
+            setFurthestCfi(book.progress);
+        }
+        
+        // Load TOC
+        const navigation = await epub.loaded.navigation;
+        setToc(navigation.toc);
+
+        // Generate locations for progress tracking
+        await epub.locations.generate(1000);
+        const initialProgress = epub.locations.percentageFromCfi(book.progress || '');
+        setProgress(initialProgress * 100);
+        setMaxProgress(initialProgress * 100);
+        
+        // Restore highlights
+        if (book.highlights) {
+          book.highlights.forEach(h => {
+            const colorMap: Record<string, string> = {
+              '#ffeb3b': 'hl-yellow',
+              '#a5d6a7': 'hl-green',
+              '#90caf9': 'hl-blue',
+              '#ef9a9a': 'hl-red'
+            };
+            const className = colorMap[h.color];
+            const styles = className ? {} : { fill: h.color, 'fill-opacity': '0.3', 'mix-blend-mode': 'multiply', 'cursor': 'pointer', 'pointer-events': 'auto' };
+            
+            rendition.annotations.add(
+                'highlight', 
+                h.cfiRange, 
+                {}, 
+                (e: any) => onHighlightClick(h.cfiRange), 
+                className || 'hl-custom',
+                styles
+            );
+          });
+        }
+
+        setIsReady(true);
+        applyTheme(theme);
+        applyFontSize(fontSize);
+        applyFontWeight(fontWeight);
+      };
+
+      initBook();
+    };
+
+    loadBook();
+
+    window.addEventListener('resize', handleResize);
+    window.addEventListener('keydown', handleKeyDown);
     window.addEventListener('beforeunload', handleBeforeUnload);
 
     return () => {
@@ -472,7 +503,8 @@ export function Reader({ book, onBack }: ReaderProps) {
     // But for now we stick to the map or default.
 
     // Save
-    await storage.addHighlight(book.id, highlight);
+    const token = localStorage.getItem('token') || undefined;
+    await bookService.addHighlight(book.id, highlight, token);
     setHighlights([...highlights, highlight]);
     setSelection(null);
     
@@ -484,7 +516,8 @@ export function Reader({ book, onBack }: ReaderProps) {
   const removeHighlight = async (cfiRange: string) => {
     if (!renditionRef.current) return;
     renditionRef.current.annotations.remove(cfiRange, 'highlight');
-    await storage.removeHighlight(book.id, cfiRange);
+    const token = localStorage.getItem('token') || undefined;
+    await bookService.removeHighlight(book.id, cfiRange, token);
     setHighlights(highlights.filter(h => h.cfiRange !== cfiRange));
   };
 
@@ -492,8 +525,9 @@ export function Reader({ book, onBack }: ReaderProps) {
   const isBookmarked = bookmarks.some(b => b.cfi === currentCfi);
 
   const toggleBookmark = async () => {
+    const token = localStorage.getItem('token') || undefined;
     if (isBookmarked) {
-      await storage.removeBookmark(book.id, currentCfi);
+      await bookService.removeBookmark(book.id, currentCfi, token);
       setBookmarks(bookmarks.filter(b => b.cfi !== currentCfi));
     } else {
       const bookmark: Bookmark = {
@@ -501,13 +535,14 @@ export function Reader({ book, onBack }: ReaderProps) {
         label: `Page ${bookmarks.length + 1}`, // Ideally we'd get chapter name
         created: Date.now()
       };
-      await storage.addBookmark(book.id, bookmark);
+      await bookService.addBookmark(book.id, bookmark, token);
       setBookmarks([...bookmarks, bookmark]);
     }
   };
 
   const deleteBookmark = async (cfi: string) => {
-    await storage.removeBookmark(book.id, cfi);
+    const token = localStorage.getItem('token') || undefined;
+    await bookService.removeBookmark(book.id, cfi, token);
     setBookmarks(bookmarks.filter(b => b.cfi !== cfi));
   };
 
@@ -563,7 +598,8 @@ export function Reader({ book, onBack }: ReaderProps) {
 
   const handleBack = async () => {
     if (currentCfi) {
-      await storage.updateProgress(book.id, currentCfi, progress);
+      const token = localStorage.getItem('token') || undefined;
+      await bookService.updateProgress(book.id, currentCfi, progress, token);
     }
     onBack();
   };
